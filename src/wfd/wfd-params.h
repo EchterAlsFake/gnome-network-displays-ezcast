@@ -15,6 +15,7 @@ struct _WfdParams
   guint16        primary_rtp_port;
   guint16        secondary_rtp_port;
   gboolean       rtcp_port_invalid;
+  gboolean       prefer_low_bandwidth;
   GByteArray    *edid;
 
   gboolean       idr_request_capability;

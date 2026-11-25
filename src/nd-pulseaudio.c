@@ -443,6 +443,7 @@ nd_pulseaudio_get_source (NdPulseaudio *self)
                 "device", device_name,
                 "client-name", client_name,
                 "do-timestamp", TRUE,
+                "buffer-time", (gint64) 1000000,
                 "server", pa_context_get_server (self->context),
                 NULL);
 

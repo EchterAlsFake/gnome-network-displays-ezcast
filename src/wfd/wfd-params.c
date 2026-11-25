@@ -87,6 +87,7 @@ wfd_params_copy (WfdParams *self)
   copy->primary_rtp_port = self->primary_rtp_port;
   copy->secondary_rtp_port = self->secondary_rtp_port;
   copy->rtcp_port_invalid = self->rtcp_port_invalid;
+  copy->prefer_low_bandwidth = self->prefer_low_bandwidth;
   if (self->edid)
     {
       copy->edid = g_byte_array_new ();

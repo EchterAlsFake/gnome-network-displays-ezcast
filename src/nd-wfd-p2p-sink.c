@@ -348,6 +348,8 @@ play_request_cb (NdWFDP2PSink *sink, GstRTSPContext *ctx, WfdClient *client)
 static void
 closed_cb (NdWFDP2PSink *sink, WfdClient *client)
 {
+  gboolean negotiation_failed = sink->state == ND_SINK_STATE_WAIT_STREAMING;
+
   if (sink->state == ND_SINK_STATE_DISCONNECTED)
     return;
 
@@ -356,7 +358,7 @@ closed_cb (NdWFDP2PSink *sink, WfdClient *client)
 
   nd_wfd_p2p_sink_sink_stop_stream_int (sink);
 
-  sink->state = ND_SINK_STATE_DISCONNECTED;
+  sink->state = negotiation_failed ? ND_SINK_STATE_ERROR : ND_SINK_STATE_DISCONNECTED;
   g_object_notify (G_OBJECT (sink), "state");
 }
 
@@ -365,6 +367,7 @@ client_connected_cb (NdWFDP2PSink *sink, WfdClient *client, WfdServer *server)
 {
   g_debug ("NdWfdP2PSink: Got client connection");
 
+  wfd_client_prefer_low_bandwidth (client);
   g_signal_handlers_disconnect_by_func (sink->server, client_connected_cb, sink);
   sink->state = ND_SINK_STATE_WAIT_STREAMING;
   g_object_notify (G_OBJECT (sink), "state");

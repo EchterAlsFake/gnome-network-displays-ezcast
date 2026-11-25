@@ -236,13 +236,11 @@ wfd_server_purge (WfdServer *self)
   GstRTSPServer *server = GST_RTSP_SERVER (self);
 
   g_autoptr(GstRTSPSessionPool) session_pool = NULL;
-  g_autoptr(GstRTSPThreadPool) thread_pool = NULL;
 
   session_pool = gst_rtsp_server_get_session_pool (server);
-  gst_rtsp_session_pool_filter (session_pool, pool_filter_remove_cb, NULL);
+  g_list_free_full (gst_rtsp_session_pool_filter (session_pool, pool_filter_remove_cb, NULL),
+                    (GDestroyNotify) g_object_unref);
 
-  gst_rtsp_server_client_filter (server, client_filter_remove_cb, NULL);
-
-  thread_pool = gst_rtsp_server_get_thread_pool (server);
-  gst_rtsp_session_pool_filter (session_pool, pool_filter_remove_cb, NULL);
+  g_list_free_full (gst_rtsp_server_client_filter (server, client_filter_remove_cb, NULL),
+                    (GDestroyNotify) g_object_unref);
 }

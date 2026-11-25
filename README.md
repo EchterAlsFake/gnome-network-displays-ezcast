@@ -1,3 +1,44 @@
+# GNOME Network Displays for EZCast Pro
+
+This is an unofficial fork of [GNOME Network Displays](https://gitlab.gnome.org/GNOME/gnome-network-displays), based on `c305023`. The patches were **vibe-coded with AI assistance and tested on real hardware**. The tests below cover one laptop and receiver setup.
+
+## Changes
+
+- Wi-Fi Direct negotiates a progressive H.264 mode advertised by the receiver and prefers 720p at up to 60 fps for motion. The stream uses stereo AAC when the receiver advertises it.
+- The Intel VA-API encoder receives aligned VA surfaces through `vapostproc`. This fixed a green strip caused by zeroed chroma in the bottom 32 rows of the 720p image.
+- Shorter queues and a 150 ms sender latency target for the VA and x264 encoders reduce buffering. H.264 parameter sets repeat at each keyframe, and RTSP negotiation rejections surface as errors.
+
+## Tested setup
+
+| Component | Tested version or hardware |
+| --- | --- |
+| Laptop | ASUS Zenbook S 14 with Intel Arc graphics and Intel Wi-Fi 7 BE201 |
+| Operating system | Arch Linux, kernel `7.3.5-arch1-1` |
+| Screen capture | Hyprland 0.57.2, xdg-desktop-portal-hyprland 1.5.0, PipeWire 1.6.11 |
+| Media stack | GStreamer and gst-rtsp-server 1.28.9, Intel media driver 26.3.5 (`vah264enc` and `vapostproc`) |
+| Wi-Fi Direct | NetworkManager 1.58.1, wpa_supplicant 2.12 |
+| Receiver | EZCast Pro, receiver-reported version `1.17478.177` |
+
+Projection was confirmed on the physical display at 720p/30 over 2.4 GHz. Decoding the subsequent live stream verified the green-strip fix. A separate 5 GHz run negotiated 720p/60 with AAC and reported zero Wi-Fi transmit failures over more than 57,000 packets. A local RTSP/RTP test also decoded a moving test pattern at 720p/60. The receiver advertised up to 1080p over the H.264 Miracast handshake. 4K HDMI output is a separate receiver capability.
+
+### Wi-Fi channel workaround
+
+The tested Wi-Fi Direct link was unreliable on 5 GHz channel 157 and stable on channel 149. This was a separate wpa_supplicant setting on the laptop. To reproduce it on a system where channel 149 is available, substitute your own P2P control interface for `p2p-dev-wlan0` and reconnect the cast after running the commands:
+
+```sh
+sudo wpa_cli -i p2p-dev-wlan0 set p2p_pref_chan 124:149
+sudo wpa_cli -i p2p-dev-wlan0 p2p_set disallow_freq 4900-5735,5755-7125
+```
+
+This keeps 2.4 GHz available as a fallback. If you started with the default settings, reset the temporary preference and restriction with:
+
+```sh
+sudo wpa_cli -i p2p-dev-wlan0 set p2p_pref_chan ''
+sudo wpa_cli -i p2p-dev-wlan0 p2p_set disallow_freq ''
+```
+
+## Upstream documentation
+
 This is an experimental implementation of Wi-Fi Display (aka Miracast).
 
 The application will stream the selected monitor if the mutter screencast

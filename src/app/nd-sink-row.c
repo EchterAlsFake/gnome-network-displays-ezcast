@@ -36,11 +36,6 @@ G_DEFINE_TYPE (NdSinkRow, nd_sink_row, ADW_TYPE_ACTION_ROW)
 static GParamSpec * props[PROP_LAST] = { NULL, };
 
 
-static void
-nd_sink_row_sync (NdSinkRow *self)
-{
-  g_object_bind_property (self->sink, "display-name", self, "title", G_BINDING_SYNC_CREATE);
-}
 
 static void
 nd_sink_row_get_property (GObject    *object,
@@ -76,15 +71,7 @@ nd_sink_row_set_property (GObject      *object,
       g_assert (sink_row->sink == NULL);
       sink_row->sink = g_value_dup_object (value);
 
-      g_assert (sink_row->sink != NULL);
-
-      g_signal_connect_object (sink_row->sink,
-                               "notify",
-                               (GCallback) nd_sink_row_sync,
-                               object,
-                               G_CONNECT_SWAPPED);
-      nd_sink_row_sync (sink_row);
-
+      g_object_bind_property (sink_row->sink, "display-name", sink_row, "title", G_BINDING_SYNC_CREATE);
       break;
 
     default:

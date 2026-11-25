@@ -57,6 +57,12 @@ wfd_client_new (void)
   return g_object_new (WFD_TYPE_CLIENT, NULL);
 }
 
+void
+wfd_client_prefer_low_bandwidth (WfdClient *self)
+{
+  self->params->prefer_low_bandwidth = TRUE;
+}
+
 static void
 wfd_client_finalize (GObject *object)
 {
@@ -99,89 +105,91 @@ wfd_client_check_requirements (GstRTSPClient *client, GstRTSPContext *ctx, gchar
   return res;
 }
 
-gint
-compare_resolutions (gconstpointer a, gconstpointer b)
+static const WfdResolution *
+wfd_client_pick_resolution (WfdVideoCodec *codec, gboolean prefer_low_bandwidth)
 {
-  WfdResolution *res_a = (WfdResolution *) a;
-  WfdResolution *res_b = (WfdResolution *) b;
-  gint a_weight;
-  gint b_weight;
+  g_autoptr(GList) resolutions = wfd_video_codec_get_resolutions (codec);
+  const WfdResolution *preferred = NULL;
+  const WfdResolution *fallback = NULL;
+  guint preferred_weight = 0;
+  guint fallback_weight = G_MAXUINT;
+  guint max_width = prefer_low_bandwidth ? 1280 : 1920;
+  guint max_height = prefer_low_bandwidth ? 720 : 1080;
+  guint max_refresh_rate = prefer_low_bandwidth ? 60 : 30;
 
-  a_weight = res_a->width * res_a->height * 100 + res_a->refresh_rate / (res_a->interlaced ? 2 : 1) - res_a->interlaced;
-  b_weight = res_b->width * res_b->height * 100 + res_b->refresh_rate / (res_b->interlaced ? 2 : 1) - res_b->interlaced;
-  return a_weight - b_weight;
-}
-
-void
-wfd_client_select_codec_and_resolution (WfdClient *self, WfdH264ProfileFlags profile)
-{
-  gint i;
-  WfdVideoCodec *codec = NULL;
-
-  for (i = 0; i < self->params->video_codecs->len; i++)
+  for (GList *item = resolutions; item; item = item->next)
     {
-      WfdVideoCodec *item = g_ptr_array_index (self->params->video_codecs, i);
+      const WfdResolution *mode = item->data;
+      guint weight;
 
-      /* Use the first codec we can find. */
-      if (!codec)
-        codec = item;
+      if (mode->interlaced)
+        continue;
 
-      if (codec->profile != item->profile && item->profile == profile)
-        codec = item;
+      weight = mode->width * mode->height * mode->refresh_rate;
+      if (weight < fallback_weight)
+        {
+          fallback = mode;
+          fallback_weight = weight;
+        }
 
-      if (codec->profile == item->profile && item->level > codec->level)
-        codec = item;
+      if (mode->width <= max_width && mode->height <= max_height &&
+          mode->refresh_rate <= max_refresh_rate && weight > preferred_weight)
+        {
+          preferred = mode;
+          preferred_weight = weight;
+        }
     }
 
-  if (codec)
-    self->params->selected_codec = wfd_video_codec_ref (codec);
-  else
-    g_warning ("No codec/resolution could be found, falling back to defaults!");
+  return preferred ? preferred : fallback;
+}
 
-#if 0
-  /* The native resolution reported by some devices is just useless */
-  if (codec->native)
-    self->params->selected_resolution = wfd_resolution_copy (codec->native);
-  else
+static gboolean
+wfd_client_select_codec_and_resolution (WfdClient *self, WfdH264ProfileFlags profile)
+{
+  WfdVideoCodec *codec = NULL;
+  const WfdResolution *resolution = NULL;
+
+  for (guint i = 0; i < self->params->video_codecs->len; i++)
     {
-      /* Find a good resolution. */
-      g_autoptr(GList) resolutions = NULL;
-      GList *last;
+      WfdVideoCodec *item = g_ptr_array_index (self->params->video_codecs, i);
+      const WfdResolution *mode = wfd_client_pick_resolution (item, self->params->prefer_low_bandwidth);
 
-      resolutions = wfd_video_codec_get_resolutions (codec);
-      resolutions = g_list_sort (resolutions, compare_resolutions);
-      last = g_list_last (resolutions);
-      if (last)
-        self->params->selected_resolution = wfd_resolution_copy ((WfdResolution *) last->data);
-      else
+      if (mode && (!codec ||
+                   (codec->profile != profile && item->profile == profile) ||
+                   (codec->profile == item->profile && item->level > codec->level)))
         {
-#endif
-  /* Create a standard full HD resolution if everything fails. */
-  g_warning ("WfdClient: No resolution found, falling back to standard FullHD resolution.");
-  self->params->selected_resolution = wfd_resolution_new ();
-  self->params->selected_resolution->width = 1920;
-  self->params->selected_resolution->height = 1080;
-  self->params->selected_resolution->refresh_rate = 30;
-  self->params->selected_resolution->interlaced = FALSE;
-#if 0
-}
-}
-#endif
-  g_debug ("selected resolution %i, %i @%i", self->params->selected_resolution->width, self->params->selected_resolution->height, self->params->selected_resolution->refresh_rate);
+          codec = item;
+          resolution = mode;
+        }
+    }
 
-  /* We currently only support AAC with two channels  */
-  for (i = 0; i < self->params->audio_codecs->len; i++)
+  if (!codec)
     {
-      WfdAudioCodec *codec = g_ptr_array_index (self->params->audio_codecs, i);
+      g_warning ("WfdClient: The receiver did not advertise a supported progressive H.264 mode");
+      return FALSE;
+    }
 
-      /* Accept AAC with 48KHz and 2 channels; this is currently hardcoded in the media factory */
-      if (codec->type == WFD_AUDIO_AAC && codec->modes & 0x1)
+  g_clear_pointer (&self->params->selected_codec, wfd_video_codec_unref);
+  self->params->selected_codec = wfd_video_codec_ref (codec);
+  g_clear_pointer (&self->params->selected_resolution, wfd_resolution_free);
+  self->params->selected_resolution = wfd_resolution_copy (resolution);
+  g_debug ("WfdClient: Selected %dx%d at %d fps", resolution->width, resolution->height, resolution->refresh_rate);
+
+  g_clear_pointer (&self->params->selected_audio_codec, wfd_audio_codec_unref);
+  for (guint i = 0; i < self->params->audio_codecs->len; i++)
+    {
+      WfdAudioCodec *audio_codec = g_ptr_array_index (self->params->audio_codecs, i);
+
+      /* The media factory supports 48 kHz stereo AAC. */
+      if (audio_codec->type == WFD_AUDIO_AAC && (audio_codec->modes & 0x1))
         {
           self->params->selected_audio_codec = wfd_audio_codec_new ();
           self->params->selected_audio_codec->type = WFD_AUDIO_AAC;
-          self->params->selected_audio_codec->modes = G_GUINT64_CONSTANT (0x00000001);
+          self->params->selected_audio_codec->modes = 0x1;
+          break;
         }
     }
+  return TRUE;
 }
 
 gboolean
@@ -295,6 +303,17 @@ void
 wfd_client_handle_response (GstRTSPClient * client, GstRTSPContext *ctx)
 {
   WfdClient *self = WFD_CLIENT (client);
+  GstRTSPStatusCode status;
+
+  if (self->init_state != INIT_STATE_DONE &&
+      gst_rtsp_message_parse_response (ctx->response, &status, NULL, NULL) == GST_RTSP_OK &&
+      status != GST_RTSP_STS_OK)
+    {
+      g_warning ("WfdClient: Receiver rejected negotiation step %u with RTSP %u (%s)",
+                 self->init_state, status, gst_rtsp_status_as_text (status));
+      gst_rtsp_client_close (client);
+      return;
+    }
 
   /* Some sinks do not reply with the correct session-id. Which causes
    * gst-rtsp-server to not touch the session, triggering a timeout
@@ -304,7 +323,8 @@ wfd_client_handle_response (GstRTSPClient * client, GstRTSPContext *ctx)
    * to do that, just touch all of them, which is acceptable as we will
    * only have one.
    */
-  gst_rtsp_client_session_filter (client, wfd_client_touch_session_filter_func, NULL);
+  g_list_free_full (gst_rtsp_client_session_filter (client, wfd_client_touch_session_filter_func, NULL),
+                    (GDestroyNotify) g_object_unref);
 
   /* Track the initialization process and possibly trigger the
    * next state of the connection establishment. */
@@ -320,7 +340,11 @@ wfd_client_handle_response (GstRTSPClient * client, GstRTSPContext *ctx)
       wfd_params_from_sink (self->params, ctx->response->body, ctx->response->body_size);
 
       /* XXX: Pick the better profile if we have an encoder that supports it! */
-      wfd_client_select_codec_and_resolution (self, WFD_H264_PROFILE_BASE);
+      if (!wfd_client_select_codec_and_resolution (self, WFD_H264_PROFILE_BASE))
+        {
+          gst_rtsp_client_close (client);
+          break;
+        }
 
       g_idle_add (wfd_client_idle_set_params, g_object_ref (self));
       break;
@@ -352,7 +376,8 @@ wfd_client_make_path_from_uri (GstRTSPClient * client, const GstRTSPUrl * uri)
    */
   if (ctx->request &&
       (ctx->request->type_data.request.method == GST_RTSP_PLAY ||
-       ctx->request->type_data.request.method == GST_RTSP_PAUSE))
+       ctx->request->type_data.request.method == GST_RTSP_PAUSE ||
+       ctx->request->type_data.request.method == GST_RTSP_TEARDOWN))
     {
       if (g_str_has_suffix (uri->abspath, "/streamid=0"))
         return g_strndup (uri->abspath, strlen (uri->abspath) - 11);
@@ -413,7 +438,8 @@ wfd_client_keep_alive_timeout (gpointer user_data)
       return G_SOURCE_REMOVE;
     }
 
-  gst_rtsp_client_session_filter (client, wfd_client_timeout_session_filter_func, NULL);
+  g_list_free_full (gst_rtsp_client_session_filter (client, wfd_client_timeout_session_filter_func, NULL),
+                    (GDestroyNotify) g_object_unref);
 
   return G_SOURCE_CONTINUE;
 }
@@ -423,14 +449,14 @@ wfd_client_new_session (GstRTSPClient *client, GstRTSPSession *session)
 {
   WfdClient *self = WFD_CLIENT (client);
 
-  gst_rtsp_session_set_timeout (session, 30);
+  gst_rtsp_session_set_timeout (session, 60);
   g_object_set (session, "timeout-always-visible", FALSE, NULL);
 
   if (self->connection_type == CONNECTION_TYPE_WFD && 
       self->keep_alive_source_id == 0)
     {
       g_debug ("WfdClient: Enabling keep-alive timer");
-      self->keep_alive_source_id = g_timeout_add_seconds (25, wfd_client_keep_alive_timeout, client);
+      self->keep_alive_source_id = g_timeout_add_seconds (10, wfd_client_keep_alive_timeout, client);
     }
 }
 
@@ -545,10 +571,9 @@ wfd_client_pre_options_request (GstRTSPClient *client, GstRTSPContext *ctx)
            */
           self->connection_type = CONNECTION_TYPE_RTSP;
 
-          /* Enable audio with AAC and 2 channels (48kHz), currently hardcoded in the media factory*/
           self->params->selected_audio_codec = wfd_audio_codec_new ();
           self->params->selected_audio_codec->type = WFD_AUDIO_AAC;
-          self->params->selected_audio_codec->modes = G_GUINT64_CONSTANT (0x00000001);
+          self->params->selected_audio_codec->modes = 0x1;
 
           self->init_state = INIT_STATE_DONE;
         }

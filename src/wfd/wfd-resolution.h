@@ -10,7 +10,7 @@ typedef struct _WfdResolution WfdResolution;
 
 GType              wfd_resolution_get_type (void) G_GNUC_CONST;
 WfdResolution     *wfd_resolution_new (void);
-WfdResolution     *wfd_resolution_copy (WfdResolution *self);
+WfdResolution     *wfd_resolution_copy (const WfdResolution *self);
 void               wfd_resolution_free (WfdResolution *self);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WfdResolution, wfd_resolution_free)

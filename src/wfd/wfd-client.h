@@ -13,6 +13,7 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (WfdClient, wfd_client, WFD, CLIENT, GstRTSPClient)
 
 WfdClient * wfd_client_new (void);
+void wfd_client_prefer_low_bandwidth (WfdClient *self);
 void wfd_client_query_support (WfdClient *self);
 void wfd_client_trigger_method (WfdClient   *self,
                                 const gchar *method);

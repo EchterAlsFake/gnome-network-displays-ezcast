@@ -29,7 +29,7 @@ wfd_resolution_new (void)
  *   contents as @self
  */
 WfdResolution *
-wfd_resolution_copy (WfdResolution *self)
+wfd_resolution_copy (const WfdResolution *self)
 {
   WfdResolution *copy;
 

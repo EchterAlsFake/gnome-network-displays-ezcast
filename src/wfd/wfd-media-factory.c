@@ -130,6 +130,7 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
   GstElement *sinkfilter;
   GstElement *convert;
   GstElement *queue_pre_encoder;
+  GstElement *va_upload = NULL;
   GstElement *encoder;
   GstElement *encoder_elem;
   GstElement *encoding_perf;
@@ -141,7 +142,11 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
 
   /* Test input, will be replaced by real source */
   g_signal_emit (self, signals[SIGNAL_CREATE_SOURCE], 0, &source);
-  g_assert (source);
+  if (!source)
+    {
+      g_warning ("WfdMediaFactory: No video capture source is available");
+      return NULL;
+    }
   success &= gst_bin_add (bin, source);
 
   scale = gst_element_factory_make ("videoscale", "wfd-scale");
@@ -152,6 +157,7 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
 
   caps = gst_caps_new_simple ("video/x-raw",
                               "framerate", GST_TYPE_FRACTION, 30, 1,
+                              "pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1,
                               "width", G_TYPE_INT, 1920,
                               "height", G_TYPE_INT, 1080,
                               NULL);
@@ -170,8 +176,10 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
 
   queue_pre_encoder = gst_element_factory_make ("queue", "wfd-pre-encoder-queue");
   g_object_set (queue_pre_encoder,
-                "max-size-buffers", (guint) 1,
-                "leaky", 0,
+                "max-size-buffers", (guint) 4,
+                "max-size-time", (guint64) 200 * GST_MSECOND,
+                "max-size-bytes", (guint) 0,
+                "leaky", 2, /* downstream */
                 NULL);
   success &= gst_bin_add (bin, queue_pre_encoder);
 
@@ -213,6 +221,8 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
       break;
 
     case ELEMENT_VAH264:
+      va_upload = gst_element_factory_make ("vapostproc", "wfd-va-upload");
+      success &= gst_bin_add (bin, va_upload);
       encoder = gst_element_factory_make ("vah264enc", "wfd-encoder");
       encoder_elem = encoder;
       success &= gst_bin_add (bin, encoder);
@@ -222,8 +232,9 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
                     "num-slices", 1,
                     "cabac", FALSE,
                     "dct8x8", FALSE,
+                    "aud", TRUE,
+                    "ref-frames", 1,
                     NULL);
-
       break;
 
     case ELEMENT_VAAPIH264:
@@ -289,7 +300,7 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
   parse = gst_element_factory_make ("h264parse", "wfd-h264parse");
   success &= gst_bin_add (bin, parse);
   g_object_set (parse,
-                "config-interval", (gint) - 1,
+                "config-interval", (gint) -1, /* Repeat SPS/PPS at every IDR. */
                 NULL);
 
   /* Permit both constrained-baseline and baseline. Would constrained-baseline be sufficient? */
@@ -306,8 +317,9 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
   queue_mpegmux_video = gst_element_factory_make ("queue", "wfd-mpegmux-video-queue");
   success &= gst_bin_add (bin, queue_mpegmux_video);
   g_object_set (queue_mpegmux_video,
-                "max-size-buffers", (guint) 1000,
-                "max-size-time", 500 * GST_MSECOND,
+                "max-size-buffers", (guint) 0,
+                "max-size-time", (guint64) 250 * GST_MSECOND,
+                "max-size-bytes", (guint) 10 * 1024 * 1024,
                 NULL);
 
   success &= gst_element_link_many (source,
@@ -315,7 +327,19 @@ wfd_media_factory_create_video_element (WfdMediaFactory *self, GstBin *bin)
                                     sinkfilter,
                                     convert,
                                     queue_pre_encoder,
-                                    encoder,
+                                    NULL);
+
+  if (va_upload)
+    {
+      /* Use VA surfaces with correctly aligned chroma planes at heights such as 720. */
+      caps = gst_caps_from_string ("video/x-raw(memory:VAMemory),format=NV12");
+      success &= gst_element_link (queue_pre_encoder, va_upload);
+      success &= gst_element_link_filtered (va_upload, encoder, caps);
+    }
+  else
+    success &= gst_element_link (queue_pre_encoder, encoder);
+
+  success &= gst_element_link_many (encoder,
                                     encoding_perf,
                                     parse,
                                     codecfilter,
@@ -389,9 +413,10 @@ wfd_media_factory_create_audio_element (WfdMediaFactory *self)
 
   queue_mpegmux_audio = gst_element_factory_make ("queue", "wfd-mpegmux-audio-queue");
   g_object_set (queue_mpegmux_audio,
-                "max-size-buffers", (guint) 100000,
-                "max-size-time", 500 * GST_MSECOND,
-                "leaky", 0,
+                "max-size-buffers", (guint) 0,
+                "max-size-time", (guint64) 250 * GST_MSECOND,
+                "max-size-bytes", (guint) 0,
+                "leaky", 2, /* downstream */
                 NULL);
   success &= gst_bin_add (audio_pipeline, queue_mpegmux_audio);
 
@@ -437,6 +462,8 @@ wfd_media_factory_create_element (GstRTSPMediaFactory *factory, const GstRTSPUrl
   bin = GST_BIN (gst_bin_new ("nd-wfd-pipeline"));
 
   queue_mpegmux_video = wfd_media_factory_create_video_element (self, bin);
+  if (!queue_mpegmux_video)
+    return NULL;
 
   /* TODO: With gstreamer 1.17 we should be able to set things up so
    *       that audio frames are still send even if there are no new
@@ -444,18 +471,30 @@ wfd_media_factory_create_element (GstRTSPMediaFactory *factory, const GstRTSPUrl
    *       changed like doing proper variable framerate and such.
    *       This is possible as mpegtsmux was being ported to GstAggregator.
    */
+  GstStructure *prog_map;
+
   mpegmux = gst_element_factory_make ("mpegtsmux", "wfd-mpegtsmux");
   success &= gst_bin_add (bin, mpegmux);
+
+  prog_map = gst_structure_new ("prog-map",
+                                "sink_4113", G_TYPE_INT, 1,
+                                "PCR_1", G_TYPE_INT, 4113,
+                                NULL);
   g_object_set (mpegmux,
                 "alignment", (gint) 7, /* Force the correct alignment for UDP */
+                "prog-map", prog_map,
+                "latency", (guint64) 60 * GST_MSECOND,
                 NULL);
+  gst_structure_free (prog_map);
 
 
   queue_pre_payloader = gst_element_factory_make ("queue", "wfd-pre-payloader-queue");
   success &= gst_bin_add (bin, queue_pre_payloader);
+  /* Backpressure lets the raw-frame queue absorb overload without breaking the transport stream. */
   g_object_set (queue_pre_payloader,
-                "max-size-buffers", (guint) 1,
-                "leaky", 0,
+                "max-size-buffers", (guint) 0,
+                "max-size-time", (guint64) 150 * GST_MSECOND,
+                "max-size-bytes", (guint) 2 * 1024 * 1024,
                 NULL);
 
   payloader = gst_element_factory_make ("rtpmp2tpay", "pay0");
@@ -497,6 +536,8 @@ wfd_media_factory_create_element (GstRTSPMediaFactory *factory, const GstRTSPUrl
 static GstElement *
 wfd_media_factory_create_pipeline (GstRTSPMediaFactory *factory, GstRTSPMedia *media)
 {
+  WfdMediaFactory *self = WFD_MEDIA_FACTORY (factory);
+  WfdGstElement encoder = wfd_media_factory_profiles[self->factory_profile].video_encoder;
   GstElement *pipeline;
 
   pipeline = GST_RTSP_MEDIA_FACTORY_CLASS (wfd_media_factory_parent_class)->create_pipeline (factory, media);
@@ -504,7 +545,8 @@ wfd_media_factory_create_pipeline (GstRTSPMediaFactory *factory, GstRTSPMedia *m
   /* We need a high latency for the openh264 encoder at least when the
    * usage-type is set to "screen". After e.g. scene changes the latency will
    * be very high for short periods of time, and this prevents further issues. */
-  gst_pipeline_set_latency (GST_PIPELINE (pipeline), 500 * GST_MSECOND);
+  gst_pipeline_set_latency (GST_PIPELINE (pipeline),
+                            (encoder == ELEMENT_OPENH264 ? 500 : 150) * GST_MSECOND);
 
   return pipeline;
 }
@@ -527,10 +569,8 @@ wfd_configure_media_element (GstBin *bin, WfdParams *params)
   guint gop_size = resolution->refresh_rate;
   guint bitrate_kbit = wfd_video_codec_get_max_bitrate_kbit (codec);
 
-  /* Limit initial video bitrate to 512kBit/s to ensure we don't
-   * saturate the wifi link.
-   * This is a rather bad method, but it kind of works. */
-  bitrate_kbit = MIN (bitrate_kbit, 512 * 8);
+  /* Leave airtime for retries and RTSP control traffic on Wi-Fi Direct. */
+  bitrate_kbit = MIN (bitrate_kbit, params->prefer_low_bandwidth && resolution->refresh_rate <= 30 ? 2000u : 4096u);
 
   if (resolution->interlaced)
     g_warning ("Resolution should never be set to interlaced as that is not supported with all codecs.");
@@ -546,12 +586,6 @@ wfd_configure_media_element (GstBin *bin, WfdParams *params)
       g_debug ("WfdMediaFactory: Detected potential RTCP port issue, disabling keep-alive");
       quirks |= WFD_QUIRK_NO_KEEPALIVE;
     }
-
-  /* Decrease the number of keyframes if the device is able to request
-   * IDRs by itself.
-   * Note that VAAPI H264 appears to run into an assertion error in version 1.14.4 */
-  if (params->idr_request_capability && !(quirks & WFD_QUIRK_NO_IDR))
-    gop_size = 10 * resolution->refresh_rate;
 
   srcfilter = gst_bin_get_by_name (bin, "srcfilter");
   if (srcfilter != NULL)
@@ -570,6 +604,7 @@ wfd_configure_media_element (GstBin *bin, WfdParams *params)
 
   caps = gst_caps_new_simple ("video/x-raw",
                               "framerate", GST_TYPE_FRACTION, resolution->refresh_rate, 1,
+                              "pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1,
                               "width", G_TYPE_INT, resolution->width,
                               "height", G_TYPE_INT, resolution->height,
                               NULL);
@@ -682,6 +717,8 @@ wfd_configure_media_element (GstBin *bin, WfdParams *params)
 
       if (params->selected_audio_codec)
         {
+          GstStructure *prog_map;
+
           /* We currently only handle AAC with 2 channels and 48kHz */
           g_assert (params->selected_audio_codec->type == WFD_AUDIO_AAC);
           g_assert (params->selected_audio_codec->modes == 0x1);
@@ -690,11 +727,28 @@ wfd_configure_media_element (GstBin *bin, WfdParams *params)
 
           /* Hook up the audio channel */
           gst_element_link_pads (audio_pipeline, "src", mpegmux, "sink_4352");
+
+          prog_map = gst_structure_new ("prog-map",
+                                        "sink_4113", G_TYPE_INT, 1,
+                                        "sink_4352", G_TYPE_INT, 1,
+                                        "PCR_1", G_TYPE_INT, 4113,
+                                        NULL);
+          g_object_set (mpegmux, "prog-map", prog_map, NULL);
+          gst_structure_free (prog_map);
         }
       else
         {
+          GstStructure *prog_map;
+
           gst_element_set_locked_state (GST_ELEMENT (audio_pipeline), TRUE);
           gst_element_set_state (GST_ELEMENT (audio_pipeline), GST_STATE_NULL);
+
+          prog_map = gst_structure_new ("prog-map",
+                                        "sink_4113", G_TYPE_INT, 1,
+                                        "PCR_1", G_TYPE_INT, 4113,
+                                        NULL);
+          g_object_set (mpegmux, "prog-map", prog_map, NULL);
+          gst_structure_free (prog_map);
         }
     }
 
@@ -712,6 +766,8 @@ wfd_media_factory_construct (GstRTSPMediaFactory *factory, const GstRTSPUrl *url
   GstRTSPStream *stream;
 
   res = GST_RTSP_MEDIA_FACTORY_CLASS (wfd_media_factory_parent_class)->construct (factory, url);
+  if (!res)
+    return NULL;
 
   stream = gst_rtsp_media_get_stream (res, 0);
   gst_rtsp_stream_set_control (stream, "streamid=0");
@@ -765,6 +821,7 @@ static gboolean
 wfd_gst_element_present (WfdGstElement element)
 {
   g_autoptr(GstElementFactory) encoder_factory = NULL;
+  g_autoptr(GstElementFactory) va_upload_factory = NULL;
 
   /* -1 = not found
    *  0 = not checked
@@ -779,8 +836,10 @@ wfd_gst_element_present (WfdGstElement element)
     return found_elements[element] == 1;
 
   encoder_factory = gst_element_factory_find (wfd_gst_elements[element]);
+  if (encoder_factory && element == ELEMENT_VAH264)
+    va_upload_factory = gst_element_factory_find ("vapostproc");
 
-  if (encoder_factory != NULL)
+  if (encoder_factory && (element != ELEMENT_VAH264 || va_upload_factory))
     {
       g_debug ("WfdMediaFactory: Found %s gst element.", wfd_gst_elements[element]);
       found_elements[element] = 1;
@@ -803,6 +862,11 @@ wfd_gst_media_profile_present (WfdMediaProfile media_profile)
 
   for (factory_profile = 0; factory_profile < (sizeof (wfd_media_factory_profiles) / sizeof (wfd_media_factory_profiles[0])); ++factory_profile)
     {
+      const gchar *requested_encoder = g_getenv ("NETWORK_DISPLAYS_H264_ENC");
+      if (requested_encoder && g_strcmp0 (requested_encoder,
+          wfd_gst_elements[wfd_media_factory_profiles[factory_profile].video_encoder]) != 0)
+        continue;
+
       if (wfd_media_factory_profiles[factory_profile].media_profile == media_profile &&
           wfd_gst_element_present (wfd_media_factory_profiles[factory_profile].video_encoder) &&
           wfd_gst_element_present (wfd_media_factory_profiles[factory_profile].audio_encoder) &&
@@ -923,5 +987,5 @@ wfd_media_factory_init (WfdMediaFactory *self)
 
   gst_rtsp_media_factory_set_media_gtype (media_factory, WFD_TYPE_MEDIA);
   gst_rtsp_media_factory_set_suspend_mode (media_factory, GST_RTSP_SUSPEND_MODE_RESET);
-  gst_rtsp_media_factory_set_buffer_size (media_factory, 65536);
+  gst_rtsp_media_factory_set_buffer_size (media_factory, 1048576);
 }

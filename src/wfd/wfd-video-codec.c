@@ -436,7 +436,7 @@ wfd_video_codec_get_resolutions (WfdVideoCodec *self)
 gchar *
 wfd_video_codec_get_descriptor_for_resolution (WfdVideoCodec *self, const WfdResolution *resolution)
 {
-  guint16 cae_sup, vesa_sup, hh_sup;
+  guint32 cae_sup, vesa_sup, hh_sup;
   guint32 slice_enc_params;
   guint8 frame_rate_ctrl_sup;
 

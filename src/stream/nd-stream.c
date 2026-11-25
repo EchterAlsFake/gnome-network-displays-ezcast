@@ -241,16 +241,12 @@ sink_create_source_cb (NdStream * self, NdSink * sink)
 static GstElement *
 sink_create_audio_source_cb (NdStream * self, NdSink * sink)
 {
-  GstElement *res;
-
   g_debug ("NdStream: Sink create audio source cb");
 
   if (!self->pulse)
     return NULL;
 
-  res = nd_pulseaudio_get_source (self->pulse);
-
-  return g_object_ref_sink (res);
+  return g_object_ref_sink (nd_pulseaudio_get_source (self->pulse));
 }
 
 static void
